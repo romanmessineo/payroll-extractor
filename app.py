@@ -5,14 +5,14 @@ import re
 import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Conversor v0.01", layout="centered")
+st.set_page_config(page_title="Conversor v0.03", layout="wide")
 
-# --- ESTILOS CSS PERSONALIZADOS (Color más claro e icono) ---
+# --- ESTILOS CSS PERSONALIZADOS ---
 st.markdown("""
     <style>
     .titulo-ejecutivo {
         font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
-        color: #5D6D7E; /* Color gris acero más claro */
+        color: #5D6D7E;
         font-size: 26px;
         font-weight: 600;
         text-align: center;
@@ -26,7 +26,6 @@ st.markdown("""
 def limpiar_monto(texto):
     if not texto:
         return 0.0
-    # Elimina puntos de mil y cambia coma decimal por punto
     temp = texto.replace('.', '').replace(',', '.')
     try:
         return float(temp)
@@ -124,25 +123,30 @@ def procesar_liquidacion(uploaded_file):
                         reten = monto
 
                     data_empleados.append({
-                        "Legajo": current_legajo, "Código": cod_str, "Concepto": desc.strip(),
-                        "Remunerativo": remu, "No Remunerativo": no_remu, "Retenciones": reten
+                        "Legajo": current_legajo, 
+                        "Código": cod_str, 
+                        "Concepto": desc.strip(),
+                        "Remunerativo": remu, 
+                        "No Remunerativo": no_remu, 
+                        "Retenciones": reten
                     })
 
-    # --- GENERACIÓN DEL EXCEL EN MEMORIA ---
+    # --- GENERACIÓN DEL EXCEL MULTI-HOJA ---
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if data_empleados:
-            df_empleados = pd.DataFrame(data_empleados)
-            df_empleados.to_excel(writer, sheet_name='Detalle Empleados', index=False)
+            df = pd.DataFrame(data_empleados)
             
-            # Totales por Legajo
-            df_tot = df_empleados.groupby('Legajo', as_index=False).agg({
+            # Crear encabezado combinado para las columnas (Ej: "001 SUELDO BASICO")
+            df['Columna_Header'] = df['Código'] + ' ' + df['Concepto']
+            
+            # --- HOJA 1: TOTALES (RESUMEN) ---
+            df_tot = df.groupby('Legajo', as_index=False).agg({
                 'Remunerativo': 'sum', 'No Remunerativo': 'sum', 'Retenciones': 'sum'
             })
             df_tot['Sueldo Neto'] = df_tot['Remunerativo'] + df_tot['No Remunerativo'] - df_tot['Retenciones']
             
-            # --- CORRECCIÓN SEGURA DE ORDENAMIENTO ---
-            # Convierte a numero lo que puede, lo que no (S/L) lo deja como NaN y lo pone al final
+            # Ordenar por Legajo numérico
             df_tot['Legajo_Num'] = pd.to_numeric(df_tot['Legajo'], errors='coerce')
             df_tot = df_tot.sort_values(by='Legajo_Num').drop(columns=['Legajo_Num'])
             
@@ -151,8 +155,43 @@ def procesar_liquidacion(uploaded_file):
                 'No Remunerativo': 'Total No Remunerativo', 
                 'Retenciones': 'Total Retenciones'
             }, inplace=True)
-            df_tot.to_excel(writer, sheet_name='Totales por Legajo', index=False)
+            
+            df_tot.to_excel(writer, sheet_name='Totales', index=False)
+            
+            # --- FUNCIÓN AUXILIAR PARA CREAR HOJAS SÁBANA ---
+            def crear_sabana(df_source, columna_valor, nombre_hoja):
+                # Filtramos solo las filas que tienen valor en esa categoría
+                df_filtrado = df_source[df_source[columna_valor] != 0].copy()
+                
+                if not df_filtrado.empty:
+                    # Pivotar: Filas=Legajo, Columnas=Concepto, Valor=Monto
+                    pivot = df_filtrado.pivot_table(
+                        index='Legajo', 
+                        columns='Columna_Header', 
+                        values=columna_valor, 
+                        aggfunc='sum', 
+                        fill_value=0
+                    )
+                    
+                    # Resetear índice para que Legajo sea columna A
+                    pivot = pivot.reset_index()
+                    
+                    # Ordenar por Legajo
+                    pivot['Legajo_Num'] = pd.to_numeric(pivot['Legajo'], errors='coerce')
+                    pivot = pivot.sort_values(by='Legajo_Num').drop(columns=['Legajo_Num'])
+                    
+                    pivot.to_excel(writer, sheet_name=nombre_hoja, index=False)
 
+            # --- HOJA 2: REMUNERATIVO ---
+            crear_sabana(df, 'Remunerativo', 'Remunerativo')
+
+            # --- HOJA 3: NO REMUNERATIVO ---
+            crear_sabana(df, 'No Remunerativo', 'No Remunerativo')
+
+            # --- HOJA 4: RETENCIONES ---
+            crear_sabana(df, 'Retenciones', 'Retenciones')
+
+        # --- HOJA 5: APORTES PATRONALES ---
         if data_patronales:
             df_patronales = pd.DataFrame(data_patronales)
             df_patronales = df_patronales.sort_values(by='Código', key=lambda x: x.astype(int))
@@ -165,23 +204,21 @@ def procesar_liquidacion(uploaded_file):
 
 # --- INTERFAZ DE USUARIO ---
 
-# Título personalizado con icono y color nuevo
 st.markdown('<div class="titulo-ejecutivo">📑 Conversor Planilla Condensada a XLSX</div>', unsafe_allow_html=True)
 
 st.markdown("""
 1. **Sube** el PDF. 
 2. **Procesa** la información.
-3. **Descarga** el reporte.
+3. **Descarga** el reporte separado por hojas (Totales, Remunerativo, No Rem, Retenciones).
 """)
 
 uploaded_file = st.file_uploader("Arrastra aquí tu archivo PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    with st.spinner('Procesando datos contables...'):
+    with st.spinner('Separando conceptos por hoja...'):
         try:
             excel_data = procesar_liquidacion(uploaded_file)
             
-            # --- NUEVA DISPOSICIÓN EN COLUMNAS ---
             col1, col2 = st.columns([2, 1])
             
             with col1:
@@ -189,15 +226,14 @@ if uploaded_file is not None:
             
             with col2:
                 st.download_button(
-                    label="📥 Descargar Reporte",
+                    label="📥 Descargar Reporte Completo",
                     data=excel_data,
-                    file_name=f"Liquidacion_{uploaded_file.name.replace('.pdf', '')}.xlsx",
+                    file_name=f"Liquidacion_Desglosada_{uploaded_file.name.replace('.pdf', '')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
         except Exception as e:
             st.error("Hubo un error al leer el archivo.")
-            # --- ERROR AMIGABLE (Detalle oculto) ---
             with st.expander("Ver detalle técnico del error"):
                 st.write(f"Error: {e}")
 
